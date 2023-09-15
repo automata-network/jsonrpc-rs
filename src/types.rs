@@ -282,6 +282,25 @@ pub enum JsonrpcResponseRawResult {
     Err(JsonrpcErrorResponse),
 }
 
+impl JsonrpcResponseRawResult {
+    pub fn to_full(self) -> JsonrpcRawResponseFull {
+        match self {
+            JsonrpcResponseRawResult::Ok(v) => JsonrpcRawResponseFull {
+                jsonrpc: v.jsonrpc,
+                result: Some(v.result),
+                error: None,
+                id: Some(v.id),
+            },
+            JsonrpcResponseRawResult::Err(v) => JsonrpcRawResponseFull {
+                jsonrpc: v.jsonrpc,
+                result: None,
+                error: Some(v.error),
+                id: v.id,
+            }
+        }
+    }
+}
+
 impl From<JsonrpcRawResponse> for JsonrpcResponseRawResult {
     fn from(ok: JsonrpcRawResponse) -> Self {
         Self::Ok(ok)
