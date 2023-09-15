@@ -223,7 +223,8 @@ pub struct JsonrpcRawRequest {
 }
 
 fn default_params() -> serde_json::BoxRawValue {
-    serde_json::to_raw_value(&vec![]).unwrap()
+    let vs = serde_json::Value::Array(vec![]);
+    serde_json::to_raw_value(&vs).unwrap()
 }
 
 impl JsonrpcRawRequest {
