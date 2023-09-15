@@ -217,8 +217,13 @@ impl JsonrpcErrorObj {
 pub struct JsonrpcRawRequest {
     pub jsonrpc: String,
     pub method: String,
+    #[serde(default = "default_params")]
     pub params: serde_json::BoxRawValue,
     pub id: Id,
+}
+
+fn default_params() -> serde_json::BoxRawValue {
+    serde_json::to_raw_value(&vec![]).unwrap()
 }
 
 impl JsonrpcRawRequest {
@@ -283,23 +288,42 @@ impl From<JsonrpcRawResponse> for JsonrpcResponseRawResult {
     }
 }
 
+impl From<JsonrpcResponseRawResult> for JsonrpcRawResponseFull {
+    fn from(res: JsonrpcResponseRawResult) -> Self {
+        match res {
+            JsonrpcResponseRawResult::Ok(v) => Self {
+                jsonrpc: v.jsonrpc,
+                result: Some(v.result),
+                error: None,
+                id: Some(v.id),
+            },
+            JsonrpcResponseRawResult::Err(v) => Self {
+                jsonrpc: v.jsonrpc,
+                result: None,
+                error: Some(v.error),
+                id: v.id,
+            }
+        }
+    }
+}
+
 impl From<JsonrpcRawResponseFull> for JsonrpcResponseRawResult {
-    fn from(req: JsonrpcRawResponseFull) -> Self {
-        match req.error {
+    fn from(res: JsonrpcRawResponseFull) -> Self {
+        match res.error {
             Some(err) => Self::Err(JsonrpcErrorResponse {
-                jsonrpc: req.jsonrpc,
-                id: req.id,
+                jsonrpc: res.jsonrpc,
+                id: res.id,
                 error: err,
             }),
             None => {
-                let result = match req.result {
+                let result = match res.result {
                     Some(result) => result,
                     None => serde_json::RawValue::from_string("null".into()).unwrap(),
                 };
                 Self::Ok(JsonrpcRawResponse {
-                    jsonrpc: req.jsonrpc,
+                    jsonrpc: res.jsonrpc,
                     result,
-                    id: req.id.unwrap(),
+                    id: res.id.unwrap(),
                 })
             }
         }
