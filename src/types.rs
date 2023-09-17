@@ -1,8 +1,14 @@
 use std::prelude::v1::*;
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{
+        value::{MapAccessDeserializer, SeqAccessDeserializer},
+        MapAccess, SeqAccess,
+    },
+    Deserialize, Serialize,
+};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum Batchable<T> {
     Single(T),
@@ -98,6 +104,49 @@ impl<T: std::fmt::Debug> Batchable<T> {
             }
             Batchable::Single(item) => Batchable::Single(f(item)),
         }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for Batchable<T>
+where
+    T: Deserialize<'de> + std::fmt::Debug,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use std::marker::PhantomData;
+        pub struct BatchableVisitor<T>(PhantomData<T>);
+
+        impl<'de, T> serde::de::Visitor<'de> for BatchableVisitor<T>
+        where
+            T: Deserialize<'de>,
+        {
+            type Value = Batchable<T>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("an array or a map")
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let result: T = Deserialize::deserialize(MapAccessDeserializer::new(map))?;
+                Ok(Batchable::Single(result))
+            }
+
+            fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let result: Vec<T> = Deserialize::deserialize(SeqAccessDeserializer::new(seq))?;
+                Ok(Batchable::Batch(result))
+            }
+        }
+        let visitor = BatchableVisitor(PhantomData::<T>);
+
+        deserializer.deserialize_any(visitor)
     }
 }
 
@@ -297,7 +346,7 @@ impl JsonrpcResponseRawResult {
                 result: None,
                 error: Some(v.error),
                 id: v.id,
-            }
+            },
         }
     }
 }
@@ -322,7 +371,7 @@ impl From<JsonrpcResponseRawResult> for JsonrpcRawResponseFull {
                 result: None,
                 error: Some(v.error),
                 id: v.id,
-            }
+            },
         }
     }
 }
@@ -371,4 +420,29 @@ pub struct JsonrpcErrorResponse {
     pub jsonrpc: String,
     pub error: JsonrpcErrorObj,
     pub id: Option<Id>,
+}
+
+mod test {
+    use super::*;
+
+    #[allow(dead_code)]
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct Test {
+        result: serde_json::BoxRawValue,
+    }
+
+    #[test]
+    fn test_deser_rpc_resp() {
+        glog::init_test();
+        let batch_str = r#"[{"result":"test"}]"#;
+        let single_str = r#"{"result":"test"}"#;
+        let batch: Batchable<Test> = serde_json::from_slice(batch_str.as_bytes()).unwrap();
+        let single: Batchable<Test> = serde_json::from_slice(single_str.as_bytes()).unwrap();
+
+        assert!(matches!(batch, Batchable::Batch(_)));
+        assert!(matches!(single, Batchable::Single(_)));
+
+        assert_eq!(serde_json::to_string(&batch).unwrap(), batch_str);
+        assert_eq!(serde_json::to_string(&single).unwrap(), single_str);
+    }
 }
