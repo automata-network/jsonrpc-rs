@@ -1,6 +1,6 @@
 # Jsonrpc Library
 
-[![License](https://img.shields.io/badge/license-Apache-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache2-green.svg)](LICENSE)
 
 
 Supporting both client and server implementations, jsonrpc delivers powerful features including HTTP(S), WebSocket (WS/S) communication, non-blocking architecture, batch request handling, and subscriptions.
