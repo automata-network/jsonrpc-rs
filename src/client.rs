@@ -256,9 +256,15 @@ impl<C: RpcClient> JsonrpcClient<C> {
     }
 
     pub fn multi_rpc(&self, list: Vec<JsonrpcRawRequest>) -> Result<Vec<BoxRawValue>, RpcError> {
+        let can_single = list.len() == 1;
         let request = Batchable::Batch(list);
         let response = self._call(request)?;
-        let response_list = response.batch().ok_or(RpcError::UnexpectedSingleResponse)?;
+        let response_list = match response {
+            Batchable::Batch(list) => list,
+            // some servers may not return a single response if the request is single
+            Batchable::Single(single) if can_single => vec![single],
+            _ => return Err(RpcError::UnexpectedSingleResponse),
+        };
         let mut result = Vec::with_capacity(response_list.len());
         for (idx, response) in response_list.into_iter().enumerate() {
             match response {
