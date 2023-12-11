@@ -108,10 +108,14 @@ pub struct RpcArgs<'a, T: DeserializeOwned = ()> {
 
 impl<'a> RpcArgs<'a, BoxRawValue> {
     pub fn serde<T: DeserializeOwned>(&self) -> Result<RpcArgs<'a, T>, serde_json::Error> {
+        let mut params = self.params.get();
+        if params == "[]" {
+            params = "null";
+        }
         Ok(RpcArgs {
             path: self.path.clone(),
             method: self.method.clone(),
-            params: serde_json::from_raw_value(&self.params)?,
+            params: serde_json::from_str(&params)?,
             session: self.session.clone(),
         })
     }
