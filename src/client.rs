@@ -255,6 +255,18 @@ impl<C: RpcClient> JsonrpcClient<C> {
         })
     }
 
+    pub fn multi_chunk_rpc(
+        &self,
+        list: Vec<JsonrpcRawRequest>,
+        size: usize,
+    ) -> Result<Vec<BoxRawValue>, RpcError> {
+        let mut output = Vec::with_capacity(list.len());
+        for req in list.chunks(size) {
+            output.extend(self.multi_rpc(req.to_vec())?);
+        }
+        Ok(output)
+    }
+
     pub fn multi_rpc(&self, list: Vec<JsonrpcRawRequest>) -> Result<Vec<BoxRawValue>, RpcError> {
         let request = Batchable::Batch(list);
         let response = self._call(request)?;
@@ -280,6 +292,23 @@ impl<C: RpcClient> JsonrpcClient<C> {
             }
         }
         Ok(result)
+    }
+
+    pub fn batch_chunk_rpc<P, R>(
+        &self,
+        method: &str,
+        params_list: &[P],
+        size: usize,
+    ) -> Result<Vec<R>, RpcError>
+    where
+        P: Serialize + std::fmt::Debug,
+        R: DeserializeOwned,
+    {
+        let mut output = Vec::with_capacity(params_list.len());
+        for req in params_list.chunks(size) {
+            output.extend(self.batch_rpc(method, req)?);
+        }
+        Ok(output)
     }
 
     pub fn batch_rpc<P, R>(&self, method: &str, params_list: &[P]) -> Result<Vec<R>, RpcError>
