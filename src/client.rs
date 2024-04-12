@@ -1,3 +1,4 @@
+use core::panic::RefUnwindSafe;
 use std::prelude::v1::*;
 
 use base::trace::Alive;
@@ -31,8 +32,8 @@ pub enum RpcError {
     SingleFailOnBatchResponse(String, JsonrpcErrorObj),
 }
 
-pub trait SyncClientTrait: RpcClient + Send + Sync + 'static + core::fmt::Debug {}
-impl<T> SyncClientTrait for T where T: RpcClient + Send + Sync + 'static + core::fmt::Debug {}
+pub trait SyncClientTrait: RpcClient + Send + Sync + 'static + core::fmt::Debug + RefUnwindSafe {}
+impl<T> SyncClientTrait for T where T: RpcClient + Send + Sync + 'static + core::fmt::Debug + RefUnwindSafe {}
 
 #[derive(Debug)]
 pub struct MixRpcClient {

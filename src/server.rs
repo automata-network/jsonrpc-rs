@@ -1,8 +1,9 @@
+use core::panic::{RefUnwindSafe, PanicInfo};
 use std::prelude::v1::*;
 
 use crate::{
-    Batchable, JsonrpcErrorObj, JsonrpcRawRequest, JsonrpcRawResponseFull, ServerPushSubscription,
-    ServerPushSubscriptionParams, RpcEncrypt,
+    Batchable, JsonrpcErrorObj, JsonrpcRawRequest, JsonrpcRawResponseFull, RpcEncrypt,
+    ServerPushSubscription, ServerPushSubscriptionParams,
 };
 
 use super::RpcError;
@@ -47,7 +48,7 @@ where
     }
 }
 
-pub struct RpcServer<H: Send + Sync + 'static, N: Send + 'static = ()> {
+pub struct RpcServer<H: RefUnwindSafe + Send + Sync + 'static, N: Send + 'static = ()> {
     alive: Alive,
     srv: HttpWsServer<RpcServerProxy<H, N>>,
 }
@@ -87,7 +88,7 @@ impl RpcServerConfig {
     }
 }
 
-pub trait RpcServerApi<N: Send>: Send + Sync + Sized {
+pub trait RpcServerApi<N: Send>: RefUnwindSafe + Send + Sync + Sized {
     fn init_api(self: &Arc<Self>, srv: &mut RpcServer<Self, N>);
 }
 
@@ -136,7 +137,7 @@ impl<'a, T: DeserializeOwned> RpcArgs<'a, T> {
     }
 }
 
-impl<H: Send + Sync, N: Send> RpcServer<H, N> {
+impl<H: Send + Sync + RefUnwindSafe, N: Send> RpcServer<H, N> {
     pub fn new(alive: Alive, cfg: RpcServerConfig, context: Arc<H>) -> Result<Self, RpcError> {
         let (sender, receiver) = mpsc::sync_channel(cfg.threads * 2);
         let (subscription_sender, subscription_receiver) = mpsc::sync_channel(cfg.threads * 2);
@@ -172,6 +173,7 @@ impl<H: Send + Sync, N: Send> RpcServer<H, N> {
     pub fn default_jsonrpc<F>(&mut self, f: F)
     where
         F: Fn(&H, RpcArgs<BoxRawValue>) -> Result<BoxRawValue, JsonrpcErrorObj>
+            + RefUnwindSafe
             + Send
             + Sync
             + 'static,
@@ -197,7 +199,6 @@ impl<H: Send + Sync, N: Send> RpcServer<H, N> {
     where
         S: RpcServerSubscription<N> + 'static,
     {
-
         glog::info!("register subscribe handler: {:?}", handler.methods());
         let proxy = self.srv.handler();
         proxy.subscribe_handler.push(Arc::new(handler));
@@ -205,7 +206,7 @@ impl<H: Send + Sync, N: Send> RpcServer<H, N> {
 
     pub fn jsonrpc<F, P, R>(&mut self, method: &str, func: F)
     where
-        F: Fn(&H, RpcArgs<P>) -> Result<R, JsonrpcErrorObj> + 'static + Sync + Send,
+        F: Fn(&H, RpcArgs<P>) -> Result<R, JsonrpcErrorObj> + 'static + Sync + Send + RefUnwindSafe,
         R: serde::Serialize,
         for<'a> P: serde::de::Deserialize<'a>,
     {
@@ -261,11 +262,11 @@ impl<H: Send + Sync, N: Send> RpcServer<H, N> {
 
 impl<H, N: Send> RpcServer<H, N>
 where
-    H: Send + Sync + RpcEncrypt,
+    H: Send + Sync + RpcEncrypt + RefUnwindSafe,
 {
     pub fn jsonrpc_sec<F, P, R>(&mut self, method: &str, func: F)
     where
-        F: Fn(&H, RpcArgs<P>) -> Result<R, JsonrpcErrorObj> + 'static + Sync + Send,
+        F: Fn(&H, RpcArgs<P>) -> Result<R, JsonrpcErrorObj> + 'static + Sync + Send + RefUnwindSafe,
         P: DeserializeOwned,
         R: serde::Serialize,
     {
@@ -362,7 +363,12 @@ impl PartialOrd<RpcSession> for RpcSession {
 
 enum JsonrpcMethodHandler<H, N> {
     Call(
-        Arc<dyn Fn(&H, RpcArgs<BoxRawValue>) -> Result<BoxRawValue, JsonrpcErrorObj> + Send + Sync>,
+        Arc<
+            dyn Fn(&H, RpcArgs<BoxRawValue>) -> Result<BoxRawValue, JsonrpcErrorObj>
+                + Send
+                + Sync
+                + RefUnwindSafe,
+        >,
     ),
     Subscribe(Arc<dyn RpcServerSubscription<N>>),
     Unsubscribe(Arc<dyn RpcServerSubscription<N>>),
@@ -383,7 +389,12 @@ pub struct RpcServerProxy<H: Send + Sync, N = ()> {
     context: Arc<H>,
     jsonrpc_methods: BTreeMap<
         String,
-        Arc<dyn Fn(&H, RpcArgs<BoxRawValue>) -> Result<BoxRawValue, JsonrpcErrorObj> + Send + Sync>,
+        Arc<
+            dyn Fn(&H, RpcArgs<BoxRawValue>) -> Result<BoxRawValue, JsonrpcErrorObj>
+                + RefUnwindSafe
+                + Send
+                + Sync,
+        >,
     >,
     http_methods:
         BTreeMap<String, Arc<dyn Fn(&H, HttpRequestReader) -> HttpResponse + Send + Sync>>,
@@ -396,7 +407,9 @@ pub struct RpcServerProxy<H: Send + Sync, N = ()> {
     subscribe_handler: Vec<Arc<dyn RpcServerSubscription<N>>>,
 }
 
-impl<H: Send + Sync + 'static, N: Send + 'static> HttpWsServerHandler for RpcServerProxy<H, N> {
+impl<H: RefUnwindSafe + Send + Sync + 'static, N: Send + 'static> HttpWsServerHandler
+    for RpcServerProxy<H, N>
+{
     fn on_close_ws_conn(&mut self, conn_id: usize) {
         let mut subscriptions = self.subscriptions.lock().unwrap();
         let mut remove_id = Vec::new();
@@ -437,7 +450,7 @@ impl<H: Send + Sync + 'static, N: Send + 'static> HttpWsServerHandler for RpcSer
     }
 }
 
-impl<H: Send + Sync + 'static, N: Send + 'static> RpcServerProxy<H, N> {
+impl<H: RefUnwindSafe + Send + Sync + 'static, N: Send + 'static> RpcServerProxy<H, N> {
     fn process_request(&self, conn_id: usize, req: HttpRequestReader) {
         let method = match self.http_methods.get(req.path()) {
             Some(method) => method.clone(),
@@ -520,14 +533,15 @@ impl<H: Send + Sync + 'static, N: Send + 'static> RpcServerProxy<H, N> {
                                 params: req.params,
                                 session,
                             };
-                            match method(&ctx, params) {
+                            let id = req.id.clone();
+                            let run_method = || match method(&ctx, params) {
                                 Ok(result) => {
                                     glog::info!(
                                         "[elapsed={:?}] served jsonrpc {}",
                                         start.elapsed(),
                                         req.method,
                                     );
-                                    return JsonrpcRawResponseFull::ok(req.id, result);
+                                    Ok(JsonrpcRawResponseFull::ok(id, result))
                                 }
                                 Err(err) => {
                                     glog::warn!(
@@ -536,8 +550,22 @@ impl<H: Send + Sync + 'static, N: Send + 'static> RpcServerProxy<H, N> {
                                         req.method,
                                         err.message,
                                     );
-                                    err
+                                    Err(err)
                                 }
+                            };
+                            match std::panic::catch_unwind(run_method) {
+                                Ok(Ok(n)) => return n,
+                                Ok(Err(err)) => err,
+                                Err(err) => {
+                                    let info = match err.downcast_ref::<String>() {
+                                        Some(info) => info.as_str(),
+                                        None => match err.downcast_ref::<&str>() {
+                                            Some(info) => *info,
+                                            None => "unknown",
+                                        }
+                                    };
+                                    JsonrpcErrorObj::client(format!("server panick: {}", info))
+                                },
                             }
                         }
                         Some(JsonrpcMethodHandler::Subscribe(h)) => {
