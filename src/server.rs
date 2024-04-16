@@ -1,4 +1,5 @@
 use core::panic::{RefUnwindSafe, PanicInfo};
+use core::time::Duration;
 use std::prelude::v1::*;
 
 use crate::{
@@ -523,6 +524,8 @@ impl<H: RefUnwindSafe + Send + Sync + 'static, N: Send + 'static> RpcServerProxy
             move || {
                 let mut idx = 0;
                 let responses = reqs.map(|req| {
+                    let queue_time = start.elapsed();
+                    let execute_instant = Instant::now();
                     let method = &methods[idx];
                     idx += 1;
                     let err = match method {
@@ -537,7 +540,12 @@ impl<H: RefUnwindSafe + Send + Sync + 'static, N: Send + 'static> RpcServerProxy
                             let run_method = || match method(&ctx, params) {
                                 Ok(result) => {
                                     glog::info!(
-                                        "[elapsed={:?}] served jsonrpc {}",
+                                        "[{}elapsed={:?}] served jsonrpc {}",
+                                        if queue_time > Duration::from_secs(1) {
+                                            format!("queue={:?},", queue_time)
+                                        } else {
+                                            format!("")
+                                        },
                                         start.elapsed(),
                                         req.method,
                                     );
@@ -545,7 +553,12 @@ impl<H: RefUnwindSafe + Send + Sync + 'static, N: Send + 'static> RpcServerProxy
                                 }
                                 Err(err) => {
                                     glog::warn!(
-                                        "[elapsed={:?}] served jsonrpc {} fail: {}",
+                                        "[{}elapsed={:?}] served jsonrpc {} fail: {}",
+                                        if queue_time > Duration::from_secs(1) {
+                                            format!("queue={:?},", queue_time)
+                                        } else {
+                                            format!("")
+                                        },
                                         start.elapsed(),
                                         req.method,
                                         err.message,
