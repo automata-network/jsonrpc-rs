@@ -160,7 +160,7 @@ impl<H: Send + Sync + RefUnwindSafe, N: Send> RpcServer<H, N> {
             subscribe_handler: Vec::new(),
         };
         let ws_cfg = HttpWsServerConfig {
-            listen_addr: cfg.listen_addr,
+            listen_addr: cfg.listen_addr.clone(),
             tls_cert: cfg.tls_cert,
             tls_key: cfg.tls_key,
             http_max_body_length: cfg.http_max_body_length,
@@ -168,6 +168,8 @@ impl<H: Send + Sync + RefUnwindSafe, N: Send> RpcServer<H, N> {
         };
         let srv = HttpWsServer::new(ws_cfg, proxy)
             .map_err(|err| RpcError::InitError(format!("{}", err)))?;
+        
+        glog::info!("jsonrpc server will be running on: {}", cfg.listen_addr);
         Ok(RpcServer { alive, srv })
     }
 
