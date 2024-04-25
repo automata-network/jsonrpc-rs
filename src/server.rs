@@ -1,6 +1,5 @@
-use core::panic::{RefUnwindSafe, PanicInfo};
-use core::time::Duration;
 use std::prelude::v1::*;
+use std::sync::mpsc::TrySendError;
 
 use crate::{
     Batchable, JsonrpcErrorObj, JsonrpcRawRequest, JsonrpcRawResponseFull, RpcEncrypt,
@@ -9,6 +8,8 @@ use crate::{
 
 use super::RpcError;
 use base::trace::Alive;
+use core::panic::RefUnwindSafe;
+use core::time::Duration;
 use net_http::{
     HttpMethod, HttpRequestReader, HttpResponse, HttpResponseBuilder, HttpServerConns,
     HttpServerContext, HttpWsServer, HttpWsServerConfig, HttpWsServerContext, HttpWsServerHandler,
@@ -62,6 +63,7 @@ pub struct RpcServerConfig {
     pub http_max_body_length: Option<usize>,
     pub ws_frame_size: usize,
     pub threads: usize,
+    pub max_idle_secs: Option<usize>,
 }
 
 impl Default for RpcServerConfig {
@@ -72,6 +74,7 @@ impl Default for RpcServerConfig {
             tls_key: Vec::new(),
             http_max_body_length: Some(128 << 20),
             ws_frame_size: 64 << 10,
+            max_idle_secs: Some(60),
             threads: 8,
         }
     }
@@ -140,10 +143,11 @@ impl<'a, T: DeserializeOwned> RpcArgs<'a, T> {
 
 impl<H: Send + Sync + RefUnwindSafe, N: Send> RpcServer<H, N> {
     pub fn new(alive: Alive, cfg: RpcServerConfig, context: Arc<H>) -> Result<Self, RpcError> {
-        let (sender, receiver) = mpsc::sync_channel(cfg.threads * 2);
-        let (subscription_sender, subscription_receiver) = mpsc::sync_channel(cfg.threads * 2);
+        let threads = cfg.threads.max(1);
+        let (sender, receiver) = mpsc::sync_channel(threads * 100);
+        let (subscription_sender, subscription_receiver) = mpsc::sync_channel(threads * 100);
         let tp = threadpool::Builder::new()
-            .num_threads(cfg.threads.max(1))
+            .num_threads(threads)
             .thread_name("jsonrpc-server".into())
             .build();
         let proxy: RpcServerProxy<H, N> = RpcServerProxy {
@@ -165,10 +169,11 @@ impl<H: Send + Sync + RefUnwindSafe, N: Send> RpcServer<H, N> {
             tls_key: cfg.tls_key,
             http_max_body_length: cfg.http_max_body_length,
             frame_size: cfg.ws_frame_size,
+            max_idle_secs: cfg.max_idle_secs,
         };
         let srv = HttpWsServer::new(ws_cfg, proxy)
             .map_err(|err| RpcError::InitError(format!("{}", err)))?;
-        
+
         glog::info!("jsonrpc server will be running on: {}", cfg.listen_addr);
         Ok(RpcServer { alive, srv })
     }
@@ -431,18 +436,28 @@ impl<H: RefUnwindSafe + Send + Sync + 'static, N: Send + 'static> HttpWsServerHa
     }
 
     fn on_new_http_request(&mut self, ctx: &mut HttpServerContext, req: HttpRequestReader) {
-        match req.method() {
+        let success = match req.method() {
             HttpMethod::Post => {
-                self.process_jsonrpc(req.path(), RequestType::Http, ctx.conn_id, req.body());
+                self.process_jsonrpc(req.path(), RequestType::Http, ctx.conn_id, req.body())
             }
             _ => self.process_request(ctx.conn_id, req),
+        };
+        if !success {
+            // fail to process this request due to the full channel
+            // we should close this connection.
+            glog::info!("force close conn {}", ctx.conn_id);
+            ctx.is_close = true;
         }
     }
 
     fn on_new_ws_conn(&mut self, _ctx: &mut HttpWsServerContext) {}
 
     fn on_new_ws_request(&mut self, ctx: &mut HttpWsServerContext, ty: WsDataType, data: Vec<u8>) {
-        self.process_jsonrpc(ctx.path, RequestType::Ws(ty), ctx.conn_id, &data);
+        let succ = self.process_jsonrpc(ctx.path, RequestType::Ws(ty), ctx.conn_id, &data);
+        if !succ {
+            glog::info!("force close conn {}", ctx.conn_id);
+            ctx.is_close = true;
+        }
     }
 
     fn on_tick(&mut self, http: &mut HttpServerConns, ws: &mut WsServerConns) -> TickResult {
@@ -454,28 +469,49 @@ impl<H: RefUnwindSafe + Send + Sync + 'static, N: Send + 'static> HttpWsServerHa
 }
 
 impl<H: RefUnwindSafe + Send + Sync + 'static, N: Send + 'static> RpcServerProxy<H, N> {
-    fn process_request(&self, conn_id: usize, req: HttpRequestReader) {
+    fn execute_in_threadpool<T>(&self, conn_id: usize, task: T) -> bool
+    where
+        T: FnOnce() + Send + 'static,
+    {
+        let tp = self.tp.lock().unwrap();
+        if tp.queued_count() > tp.max_count() * 2 {
+            glog::warn!(
+                "rejected request from conn={}, queued={},max={}",
+                conn_id,
+                tp.queued_count(),
+                tp.max_count()
+            );
+            return false;
+        }
+        tp.execute(task);
+        true
+    }
+
+    fn process_request(&self, conn_id: usize, req: HttpRequestReader) -> bool {
         let method = match self.http_methods.get(req.path()) {
             Some(method) => method.clone(),
             None => {
                 let response = HttpResponseBuilder::not_found().to_vec();
-                let _ = self.sender.send((RequestType::Http, conn_id, response));
-                return;
+                return Self::safe_send_to_channel(
+                    &self.sender,
+                    RequestType::Http,
+                    conn_id,
+                    response,
+                );
             }
         };
 
-        let task = {
+        self.execute_in_threadpool(conn_id, {
             let ctx = self.context.clone();
             let sender = self.sender.clone();
             move || {
                 let response = method(&ctx, req).to_vec();
                 let _ = sender.send((RequestType::Http, conn_id, response));
             }
-        };
-        self.tp.lock().unwrap().execute(task);
+        })
     }
 
-    fn process_jsonrpc(&self, path: &str, ty: RequestType, conn_id: usize, body: &[u8]) {
+    fn process_jsonrpc(&self, path: &str, ty: RequestType, conn_id: usize, body: &[u8]) -> bool {
         let start = Instant::now();
         let reqs: Batchable<JsonrpcRawRequest> = match Batchable::parse(body) {
             Ok(n) => n,
@@ -488,8 +524,7 @@ impl<H: RefUnwindSafe + Send + Sync + 'static, N: Send + 'static> RpcServerProxy
                     "[elapsed={:?}] served jsonrpc: unknown request",
                     start.elapsed()
                 );
-                Self::send_result(&self.sender, ty, conn_id, response.into());
-                return;
+                return Self::send_jsonrpc_result(true, &self.sender, ty, conn_id, response.into());
             }
         };
         let default_method = self
@@ -527,7 +562,6 @@ impl<H: RefUnwindSafe + Send + Sync + 'static, N: Send + 'static> RpcServerProxy
                 let mut idx = 0;
                 let responses = reqs.map(|req| {
                     let queue_time = start.elapsed();
-                    let execute_instant = Instant::now();
                     let method = &methods[idx];
                     idx += 1;
                     let err = match method {
@@ -577,10 +611,10 @@ impl<H: RefUnwindSafe + Send + Sync + 'static, N: Send + 'static> RpcServerProxy
                                         None => match err.downcast_ref::<&str>() {
                                             Some(info) => *info,
                                             None => "unknown",
-                                        }
+                                        },
                                     };
                                     JsonrpcErrorObj::client(format!("server panick: {}", info))
-                                },
+                                }
                             }
                         }
                         Some(JsonrpcMethodHandler::Subscribe(h)) => {
@@ -633,20 +667,36 @@ impl<H: RefUnwindSafe + Send + Sync + 'static, N: Send + 'static> RpcServerProxy
                     }
                 });
 
-                Self::send_result(&sender, ty, conn_id, responses);
+                let _ = Self::send_jsonrpc_result(false, &sender, ty, conn_id, responses);
             }
         };
 
-        let tp = self.tp.lock().unwrap();
-        tp.execute(task);
+        self.execute_in_threadpool(conn_id, task)
     }
 
-    fn send_result(
+    fn safe_send_to_channel(
+        sender: &mpsc::SyncSender<(RequestType, usize, Vec<u8>)>,
+        ty: RequestType,
+        cid: usize,
+        data: Vec<u8>,
+    ) -> bool {
+        match sender.try_send((ty, cid, data)) {
+            Ok(()) => true,
+            Err(TrySendError::Disconnected(_)) => false,
+            Err(TrySendError::Full(_)) => {
+                glog::warn!("fail to send response to conn={}", cid);
+                false
+            }
+        }
+    }
+
+    fn send_jsonrpc_result(
+        safe: bool,
         sender: &mpsc::SyncSender<(RequestType, usize, Vec<u8>)>,
         ty: RequestType,
         cid: usize,
         response: Batchable<JsonrpcRawResponseFull>,
-    ) {
+    ) -> bool {
         let response = serde_json::to_vec(&response).unwrap();
         let response = if matches!(ty, RequestType::Http) {
             HttpResponseBuilder::new(200)
@@ -656,7 +706,12 @@ impl<H: RefUnwindSafe + Send + Sync + 'static, N: Send + 'static> RpcServerProxy
         } else {
             response
         };
-        let _ = sender.send((ty, cid, response));
+        if safe {
+            Self::safe_send_to_channel(sender, ty, cid, response)
+        } else {
+            let _ = sender.send((ty, cid, response));
+            true
+        }
     }
 
     fn on_tick_response(
