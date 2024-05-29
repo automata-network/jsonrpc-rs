@@ -656,6 +656,11 @@ impl<H: RefUnwindSafe + Send + Sync + 'static, N: Send + 'static> RpcServerProxy
                             }
                         }
                         None => {
+                            glog::info!(
+                                "[elapsed={:?}] served jsonrpc: unknown method: {}",
+                                start.elapsed(),
+                                req.method,
+                            );
                             JsonrpcErrorObj::client(format!("method not found: {}", req.method))
                         }
                     };
