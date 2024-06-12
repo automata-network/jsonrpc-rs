@@ -63,6 +63,7 @@ pub struct RpcServerConfig {
     pub http_max_body_length: Option<usize>,
     pub ws_frame_size: usize,
     pub threads: usize,
+    pub queue_size: usize,
     pub max_idle_secs: Option<usize>,
 }
 
@@ -76,6 +77,7 @@ impl Default for RpcServerConfig {
             ws_frame_size: 64 << 10,
             max_idle_secs: Some(60),
             threads: 8,
+            queue_size: 128,
         }
     }
 }
@@ -144,6 +146,7 @@ impl<'a, T: DeserializeOwned> RpcArgs<'a, T> {
 impl<H: Send + Sync + RefUnwindSafe, N: Send> RpcServer<H, N> {
     pub fn new(alive: Alive, cfg: RpcServerConfig, context: Arc<H>) -> Result<Self, RpcError> {
         let threads = cfg.threads.max(1);
+        let queue_size = cfg.queue_size.max(threads);
         let (sender, receiver) = mpsc::sync_channel(threads * 100);
         let (subscription_sender, subscription_receiver) = mpsc::sync_channel(threads * 100);
         let tp = threadpool::Builder::new()
@@ -152,6 +155,7 @@ impl<H: Send + Sync + RefUnwindSafe, N: Send> RpcServer<H, N> {
             .build();
         let proxy: RpcServerProxy<H, N> = RpcServerProxy {
             tp: Mutex::new(tp),
+            queue_size,
             context,
             jsonrpc_methods: BTreeMap::new(),
             http_methods: BTreeMap::new(),
@@ -394,6 +398,7 @@ impl<H, N> Clone for JsonrpcMethodHandler<H, N> {
 
 pub struct RpcServerProxy<H: Send + Sync, N = ()> {
     tp: Mutex<ThreadPool>,
+    queue_size: usize,
     context: Arc<H>,
     jsonrpc_methods: BTreeMap<
         String,
@@ -474,7 +479,7 @@ impl<H: RefUnwindSafe + Send + Sync + 'static, N: Send + 'static> RpcServerProxy
         T: FnOnce() + Send + 'static,
     {
         let tp = self.tp.lock().unwrap();
-        if tp.queued_count() > tp.max_count() * 2 {
+        if tp.queued_count() > self.queue_size {
             glog::warn!(
                 "rejected request from conn={}, queued={},max={}",
                 conn_id,
