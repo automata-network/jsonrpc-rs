@@ -26,8 +26,13 @@ impl JsonrpcHttpClient {
 impl crate::RpcClient for JsonrpcHttpClient {
     fn rpc_call(
         &self,
-        params: Batchable<JsonrpcRawRequest>,
+        mut params: Batchable<JsonrpcRawRequest>,
     ) -> Result<Batchable<JsonrpcResponseRawResult>, RpcError> {
+        let mut id = 0u32;
+        params.apply(|item| {
+            id += 1;
+            item.id = id.into();
+        });
         let body = serde_json::to_vec(&params)
             .map_err(|err| RpcError::SerdeRequestError(format!("{:?}", params), err))?;
         let mut req = HttpRequestBuilder::new_ex(self.endpoint.clone(), Some(body), |req| {
